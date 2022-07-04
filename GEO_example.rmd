@@ -1,0 +1,143 @@
+---
+title: "GEO_example"
+author: "18k临床生信版本"
+date: "2022/7/4"
+output:  
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+Date: "Last compiled on `r format(Sys.time(), '%d %B, %Y')`"
+
+# Rmarkedown基础操作
+## 这是二级标题
+**这是加粗的文字**
+
+**ctrl alt i插入代码块**
+
+**include=F会使得本段代码可以被运行，但是不会显示在最后的HTML结果里，比如安装包 设置路径这些就可以设置上**
+
+**echo=F 代码不存在于输出的HTML结果中**
+
+**results='hold' 一个代码块所有的代码都显示完， 才显示所有的结果**
+
+**collapse=TRUE 把一个框中的代码放在一起**
+——————————————————————————————————————————————————————
+
+# 安装包 用include隐藏掉了
+```{r setup, include=F,echo=F,collapse=TRUE}
+library(tidyverse)
+library(ggpubr)
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(data.table)
+library(dplyr)
+library(hdf5r)
+library(tidyverse)
+library(magrittr)
+library(EnhancedVolcano)
+library(dplyr)
+library(DESeq2)
+library(GEOquery)
+```
+
+## 1.现在以GSE147507为例子
+下载数据
+```{r 下载数据}
+gse=getGEO("GSE147507",
+           getGPL=T,
+           AnnotGPL=T,
+           destdir = ".")
+```
+
+提取数据
+```{r 提取数据}
+cli <- pData(gse[[1]])#临床数据
+anno <- fData(gse[[1]])#注释信息
+expr <- exprs(gse[[1]])#表达矩阵
+
+cli2 <- pData(gse[[2]])#临床数据
+anno2 <- fData(gse[[2]])#注释信息
+expr2 <- exprs(gse[[2]])#表达矩阵
+# 可以看到这种自动注释的方法不一定有效
+# 比如现在除了临床样本cli，别的都是空的
+# 这种时候就需要手动下载sup处的表达矩阵
+# 必要的话再手动下载GPL注释文件
+```
+
+手动下载sup处的表达数据
+GSE147507_RawReadCounts_Human
+```{r 手动操作数据,collapse=TRUE}
+Exp <- as.data.frame(fread("GSE147507_RawReadCounts_Human.tsv"))
+rownames(Exp) <- Exp$V1
+Exp <- Exp[,-1]
+dim(Exp)
+colnames(Exp)
+```
+
+看一下Series的组成情况
+```{r 想循环赋值一定要先建一个空数据框}
+series <- data.frame(Series=c(rep(NA,78)),Sample=c(rep(NA,78)))
+for (i in (1:length(colnames(Exp)))){
+  series[i,1] <- unlist(strsplit(colnames(Exp)[i], "_"))[1]
+  series[i,2]<- colnames(Exp)[i]
+}
+table(series$Series)
+# 大的分组应该就是这几个了，拿出来分别分析
+```
+
+现在取其中的series1进行差异分析
+```{r}
+# 观察数据，其实就是Series1_NHBE_Mock & Series1_NHBE_SARS-CoV-2各有三个生物学重复
+# choose your group here, for example:1
+myseries <- series%>%filter(Series == paste0("Series",1)) 
+```
+
+分组，其实就是condition信息
+```{r}
+# strsplit返回一个list结果，用unlist阻止它返回list
+myseries$Condition <- c(rep(NA,length(myseries$Series)))
+for (i in(1:length(myseries$Series))) {
+  myseries$Condition[i] <- unlist(strsplit(myseries$Sample[i], "_"))[length(unlist(strsplit(myseries$Sample[i], "_")))-1]
+}
+```
+
+走DESeq2流程
+```{r}
+##DESeq2的conditon因子构建，代表分组，比如我这里就就是group Mock和 group SARS-CoV-2
+condition <- factor(myseries$Condition)
+
+##构建表达矩阵数据data，按分析需要，提取我们需要的表达矩阵
+data <- Exp[,myseries$Sample]
+
+##开始差异分析 DESeq2
+dds <- DESeqDataSetFromMatrix(countData =data, 
+                              DataFrame(condition), design= ~ condition )#构建DES数据类型
+dds <- DESeq(dds)
+save(dds,file = "Series1_Mock_vs_SARS_dds.rda")#储存dds结果
+resultsNames(dds)#[1] "Intercept"                    "condition_SARS.CoV.2_vs_Mock"即结果是SARS.CoV.2_vs_Mock的形式展示的
+res <- results(dds)
+summary(res)
+table(res$padj<0.05) #可取P值小于0.05的结果
+res[order(res$padj), ] %>% head   #查看排在前几位的差异情况 
+
+##随意筛选了一下结果，可以自己确定结果筛选或者处理dds结果
+res <- res[order(res$padj),]# 按照 padj 值进行排序
+diff_gene_deseq2 <-subset(res,padj < 0.05 & (log2FoldChange > 1 | log2FoldChange < -1))
+diff_gene_deseq2 <- row.names(diff_gene_deseq2)
+
+resdata <-  merge(as.data.frame(res),as.data.frame(counts(dds,normalize=TRUE)),by="row.names",sort=FALSE)
+##得到csv格式的差异表达分析结果
+write.csv(resdata,file= "Series1_Mock_vs_SARS.csv",row.names = F)
+
+##火山图简单看一下结果
+EnhancedVolcano(res,
+                lab = rownames(res),
+                x = 'log2FoldChange',
+                y = 'pvalue')
+```
+
+
+
